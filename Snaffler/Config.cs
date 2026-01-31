@@ -106,32 +106,52 @@ namespace Snaffler
             ValueArgument<string> logType = new ValueArgument<string>('t', "logtype", "Type of log you would like to output. Currently supported options are plain and JSON. Defaults to plain.");
             ValueArgument<string> timeOutArg = new ValueArgument<string>('e', "timeout",
                 "Interval between status updates (in minutes) also acts as a timeout for AD data to be gathered via LDAP. Turn this knob up if you aren't getting any computers from AD when you run Snaffler through a proxy or other slow link. Default = 5");
-            // list of letters i haven't used yet: gnqw
+
+            // LDAP Authentication arguments
+            ValueArgument<string> ldapUserArg = new ValueArgument<string>('w', "ldap-user",
+                "Username for LDAP authentication in DOMAIN\\username format");
+            ValueArgument<string> ldapPasswordArg = new ValueArgument<string>('q', "ldap-password",
+                "Password for LDAP authentication");
+            SwitchArgument ldapsArg = new SwitchArgument('G', "ldaps",
+                "Use LDAPS (LDAP over SSL/TLS) on port 636 instead of standard LDAP on port 389", false);
+            ValueArgument<string> dnsServerArg = new ValueArgument<string>('H', "dns-server",
+                "DNS server IP address to use for name resolution");
+            ValueArgument<string> dcIpArg = new ValueArgument<string>('J', "dc-ip",
+                "Domain Controller IP address to connect to directly");
 
             CommandLineParser.CommandLineParser parser = new CommandLineParser.CommandLineParser();
-            parser.Arguments.Add(timeOutArg);
-            parser.Arguments.Add(configFileArg);
-            parser.Arguments.Add(outFileArg);
-            parser.Arguments.Add(helpArg);
-            parser.Arguments.Add(stdOutArg);
-            parser.Arguments.Add(snaffleArg);
-            parser.Arguments.Add(snaffleSizeArg);
-            parser.Arguments.Add(dirTargetArg);
-            parser.Arguments.Add(interestLevel);
-            parser.Arguments.Add(domainArg);
-            parser.Arguments.Add(verboseArg);
-            parser.Arguments.Add(domainControllerArg);
-            parser.Arguments.Add(maxGrepSizeArg);
-            parser.Arguments.Add(grepContextArg);
-            parser.Arguments.Add(domainUserArg);
-            parser.Arguments.Add(tsvArg);
-            parser.Arguments.Add(dfsArg);
-            parser.Arguments.Add(findSharesOnlyArg);
-            parser.Arguments.Add(maxThreadsArg);
-            parser.Arguments.Add(compTargetArg);
-            parser.Arguments.Add(ruleDirArg);
-            parser.Arguments.Add(logType);
-            parser.Arguments.Add(compExclusionArg);
+            parser.ShowUsageOnEmptyCommandline = false;
+            try
+            {
+                parser.Arguments.Add(timeOutArg);
+                parser.Arguments.Add(configFileArg);
+                parser.Arguments.Add(outFileArg);
+                parser.Arguments.Add(helpArg);
+                parser.Arguments.Add(stdOutArg);
+                parser.Arguments.Add(snaffleArg);
+                parser.Arguments.Add(snaffleSizeArg);
+                parser.Arguments.Add(dirTargetArg);
+                parser.Arguments.Add(interestLevel);
+                parser.Arguments.Add(domainArg);
+                parser.Arguments.Add(verboseArg);
+                parser.Arguments.Add(domainControllerArg);
+                parser.Arguments.Add(maxGrepSizeArg);
+                parser.Arguments.Add(grepContextArg);
+                parser.Arguments.Add(domainUserArg);
+                parser.Arguments.Add(tsvArg);
+                parser.Arguments.Add(dfsArg);
+                parser.Arguments.Add(findSharesOnlyArg);
+                parser.Arguments.Add(maxThreadsArg);
+                parser.Arguments.Add(compTargetArg);
+                parser.Arguments.Add(ruleDirArg);
+                parser.Arguments.Add(logType);
+                parser.Arguments.Add(compExclusionArg);
+                parser.Arguments.Add(ldapUserArg);
+                parser.Arguments.Add(ldapPasswordArg);
+                parser.Arguments.Add(ldapsArg);
+                parser.Arguments.Add(dnsServerArg);
+                parser.Arguments.Add(dcIpArg);
+            }
 
             // extra check to handle builtin behaviour from cmd line arg parser
             if ((args.Contains("--help") || args.Contains("/?") || args.Contains("help") || args.Contains("-h") || args.Length == 0))
@@ -298,6 +318,68 @@ namespace Snaffler
                 {
                     parsedConfig.TargetDc = domainControllerArg.Value;
                     Mq.Degub("Target DC is " + domainControllerArg.Value);
+                }
+
+                // LDAP Authentication args
+                if (ldapUserArg.Parsed && !String.IsNullOrEmpty(ldapUserArg.Value))
+                {
+                    if (!System.Text.RegularExpressions.Regex.IsMatch(ldapUserArg.Value, ".+\\\\.+", System.Text.RegularExpressions.RegexOptions.IgnoreCase))
+                    {
+                        Mq.Error("LDAP username must be in DOMAIN\\username format");
+                        return null;
+                    }
+                    parsedConfig.LdapUser = ldapUserArg.Value;
+                    Mq.Degub("LDAP authentication user set");
+                }
+
+                if (ldapPasswordArg.Parsed && !String.IsNullOrEmpty(ldapPasswordArg.Value))
+                {
+                    parsedConfig.LdapPassword = ldapPasswordArg.Value;
+                    Mq.Degub("LDAP authentication password set");
+                }
+
+                if (ldapsArg.Parsed)
+                {
+                    parsedConfig.UseLdaps = true;
+                    Mq.Degub("LDAPS (SSL/TLS) enabled");
+                }
+
+                // Validate that both LDAP user and password are provided if either is specified
+                if ((!String.IsNullOrEmpty(parsedConfig.LdapUser) && String.IsNullOrEmpty(parsedConfig.LdapPassword)) ||
+                    (String.IsNullOrEmpty(parsedConfig.LdapUser) && !String.IsNullOrEmpty(parsedConfig.LdapPassword)))
+                {
+                    Mq.Error("Both LDAP username and password must be provided together");
+                    return null;
+                }
+
+                // DNS Server configuration
+                if (dnsServerArg.Parsed && !String.IsNullOrEmpty(dnsServerArg.Value))
+                {
+                    if (System.Net.IPAddress.TryParse(dnsServerArg.Value, out _))
+                    {
+                        parsedConfig.DnsServer = dnsServerArg.Value;
+                        Mq.Degub("DNS server set to: " + parsedConfig.DnsServer);
+                    }
+                    else
+                    {
+                        Mq.Error("Invalid DNS server IP address format");
+                        return null;
+                    }
+                }
+
+                // DC IP configuration
+                if (dcIpArg.Parsed && !String.IsNullOrEmpty(dcIpArg.Value))
+                {
+                    if (System.Net.IPAddress.TryParse(dcIpArg.Value, out _))
+                    {
+                        parsedConfig.DcIp = dcIpArg.Value;
+                        Mq.Degub("DC IP set to: " + parsedConfig.DcIp);
+                    }
+                    else
+                    {
+                        Mq.Error("Invalid DC IP address format");
+                        return null;
+                    }
                 }
 
                 if (domainUserArg.Parsed)

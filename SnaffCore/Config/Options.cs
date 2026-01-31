@@ -56,7 +56,14 @@ namespace SnaffCore.Config
         public bool ShareFinderEnabled { get; set; } = true;
         public string TargetDomain { get; set; }
         public string TargetDc { get; set; }
-        public bool LogDeniedShares { get; set; } = false; 
+        public bool LogDeniedShares { get; set; } = false;
+
+        // LDAP Authentication Options
+        public string LdapUser { get; set; }
+        public string LdapPassword { get; set; }
+        public bool UseLdaps { get; set; } = false;
+        public string DnsServer { get; set; }
+        public string DcIp { get; set; } 
 
         // FileScanner Options
         public bool DomainUserRules { get; set; } = false;

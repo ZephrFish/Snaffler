@@ -73,12 +73,21 @@ namespace SnaffCore.ActiveDirectory
         {
             string ldapBase = $"CN=Partitions,CN=Configuration,DC={_targetDomain.Replace(".", ",DC=")}";
 
-            DirectorySearch ds = new DirectorySearch(_targetDomain, _targetDc, ldapBase, null, null, 0, false);
+            // Extract LDAP credentials if provided
+            string ldapUsername = null;
+            string ldapPassword = null;
+            if (!string.IsNullOrEmpty(MyOptions.LdapUser) && !string.IsNullOrEmpty(MyOptions.LdapPassword))
+            {
+                ldapUsername = MyOptions.LdapUser;
+                ldapPassword = MyOptions.LdapPassword;
+            }
+
+            DirectorySearch ds = new DirectorySearch(_targetDomain, _targetDc, ldapUsername, ldapPassword, 0, MyOptions.UseLdaps);
 
             string[] ldapProperties = new string[] { "netbiosname"};
             string ldapFilter = string.Format("(&(objectcategory=Crossref)(dnsRoot={0})(netBIOSName=*))",_targetDomain);
 
-            foreach (SearchResultEntry sre in ds.QueryLdap(ldapFilter, ldapProperties, System.DirectoryServices.Protocols.SearchScope.Subtree))
+            foreach (SearchResultEntry sre in ds.QueryLdap(ldapFilter, ldapProperties, System.DirectoryServices.Protocols.SearchScope.Subtree, ldapBase))
             {
                 return sre.GetProperty("netbiosname");
             }
@@ -108,6 +117,13 @@ namespace SnaffCore.ActiveDirectory
                 }
 
                 // Input is not an IP, treat as FQDN and resolve
+                // Check if custom DNS server is configured
+                if (!string.IsNullOrEmpty(MyOptions.DnsServer))
+                {
+                    return ResolveWithCustomDns(input, MyOptions.DnsServer);
+                }
+
+                // Standard DNS resolution
                 IPHostEntry hostEntry = Dns.GetHostEntry(input);
                 IPAddress ipv4Address = hostEntry.AddressList
                     .FirstOrDefault(ip => ip.AddressFamily == System.Net.Sockets.AddressFamily.InterNetwork);
@@ -118,6 +134,81 @@ namespace SnaffCore.ActiveDirectory
             {
                 // Handle DNS resolution errors
                 Console.WriteLine($"Resolution failed for '{input}': {ex.Message}");
+            }
+        }
+
+        /// <summary>
+        /// Resolve hostname using a specific DNS server
+        /// </summary>
+        /// <param name="hostname">Hostname to resolve</param>
+        /// <param name="dnsServer">DNS server to use</param>
+        /// <returns>Resolved IP address or null if failed</returns>
+        private static string ResolveWithCustomDns(string hostname, string dnsServer)
+        {
+            try
+            {
+                // Use nslookup as a fallback for custom DNS resolution
+                var processInfo = new System.Diagnostics.ProcessStartInfo
+                {
+                    FileName = "nslookup",
+                    Arguments = $"{hostname} {dnsServer}",
+                    UseShellExecute = false,
+                    RedirectStandardOutput = true,
+                    CreateNoWindow = true,
+                    WindowStyle = System.Diagnostics.ProcessWindowStyle.Hidden
+                };
+
+                using (var process = System.Diagnostics.Process.Start(processInfo))
+                {
+                    string output = process.StandardOutput.ReadToEnd();
+                    process.WaitForExit();
+
+                    // Parse nslookup output for IP addresses
+                    var lines = output.Split('\n');
+                    foreach (string line in lines)
+                    {
+                        string trimmedLine = line.Trim();
+                        if (trimmedLine.StartsWith("Address:") && !trimmedLine.Contains("#"))
+                        {
+                            string ipPart = trimmedLine.Substring("Address:".Length).Trim();
+                            if (IPAddress.TryParse(ipPart, out IPAddress addr) &&
+                                addr.AddressFamily == System.Net.Sockets.AddressFamily.InterNetwork)
+                            {
+                                return addr.ToString();
+                            }
+                        }
+                        // Also check for non-authoritative answer format
+                        else if (trimmedLine.StartsWith("Name:") && lines.Length > Array.IndexOf(lines, line) + 1)
+                        {
+                            string nextLine = lines[Array.IndexOf(lines, line) + 1].Trim();
+                            if (nextLine.StartsWith("Address:"))
+                            {
+                                string ipPart = nextLine.Substring("Address:".Length).Trim();
+                                if (IPAddress.TryParse(ipPart, out IPAddress addr) &&
+                                    addr.AddressFamily == System.Net.Sockets.AddressFamily.InterNetwork)
+                                {
+                                    return addr.ToString();
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Custom DNS resolution failed for '{hostname}' using DNS '{dnsServer}': {ex.Message}");
+            }
+
+            // Fallback to standard resolution
+            try
+            {
+                IPHostEntry hostEntry = Dns.GetHostEntry(hostname);
+                IPAddress ipv4Address = hostEntry.AddressList
+                    .FirstOrDefault(ip => ip.AddressFamily == System.Net.Sockets.AddressFamily.InterNetwork);
+                return ipv4Address?.ToString();
+            }
+            catch
+            {
                 return null;
             }
         }
@@ -128,36 +219,72 @@ namespace SnaffCore.ActiveDirectory
         {
             Mq = BlockingMq.GetMq();
 
+            // Set custom DNS server if provided
+            if (!string.IsNullOrEmpty(MyOptions.DnsServer))
+            {
+                Mq.Info($"Using custom DNS server: {MyOptions.DnsServer}");
+                // DNS server will be used in GetIPv4Address method
+            }
+
             // target domain set
             if (!string.IsNullOrEmpty(MyOptions.TargetDomain))
             {
                 Mq.Trace("Target Domain specified: " + MyOptions.TargetDomain);
                 _targetDomain = MyOptions.TargetDomain;
 
+                // Check if DC IP is explicitly provided
+                if (!string.IsNullOrEmpty(MyOptions.DcIp))
+                {
+                    Mq.Trace("DC IP specified: " + MyOptions.DcIp);
+                    _targetDc = MyOptions.DcIp;
+                }
                 // target DC set
-                if (!string.IsNullOrEmpty(MyOptions.TargetDc)){
+                else if (!string.IsNullOrEmpty(MyOptions.TargetDc))
+                {
                     Mq.Trace("Target DC specified: " + MyOptions.TargetDc);
                     string dcIp = GetIPv4Address(MyOptions.TargetDc);
                     _targetDc = dcIp;
                 }
-                else {
+                else
+                {
                     Mq.Trace("No target DC specified, using domain as DC.");
                     string dcIp = GetIPv4Address(MyOptions.TargetDomain);
-
                     _targetDc = dcIp;
                 }
             }
             // no target DC or domain set
             else
             {
-                Mq.Trace("No DC or domain specified, setting current domain from user context.");
-                _currentDomain = Domain.GetCurrentDomain();
-                _targetDomain = _currentDomain.Name;
-                _targetDc = _targetDomain;
+                // Check if DC IP is provided without domain
+                if (!string.IsNullOrEmpty(MyOptions.DcIp))
+                {
+                    Mq.Trace("DC IP specified without domain: " + MyOptions.DcIp);
+                    _targetDc = MyOptions.DcIp;
+                    // Try to get domain from DC
+                    _targetDomain = _targetDc;
+                }
+                else
+                {
+                    Mq.Trace("No DC or domain specified, setting current domain from user context.");
+                    _currentDomain = Domain.GetCurrentDomain();
+                    _targetDomain = _currentDomain.Name;
+                    _targetDc = _targetDomain;
+                }
             }
 
             _targetDomainNetBIOSName = GetNetBiosDomainName();
-            DirectorySearch directorySearch = new DirectorySearch(_targetDomain, _targetDc);
+
+            // Extract LDAP credentials if provided
+            string ldapUsername = null;
+            string ldapPassword = null;
+            if (!string.IsNullOrEmpty(MyOptions.LdapUser) && !string.IsNullOrEmpty(MyOptions.LdapPassword))
+            {
+                ldapUsername = MyOptions.LdapUser;
+                ldapPassword = MyOptions.LdapPassword;
+                Mq.Info("Using provided LDAP credentials for authentication");
+            }
+
+            DirectorySearch directorySearch = new DirectorySearch(_targetDomain, _targetDc, ldapUsername, ldapPassword, 0, MyOptions.UseLdaps);
             _directorySearch = directorySearch;
         }
 

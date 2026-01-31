@@ -325,11 +325,28 @@ namespace LibSnaffle.ActiveDirectory.LDAP
                 ldapSessionOptions.Sealing = true;
             }
             */
+            // Enable SSL/TLS if secure LDAP is requested
+            if (_secureLdap)
+            {
+                ldapSessionOptions.SecureSocketLayer = true;
+                ldapSessionOptions.VerifyServerCertificate = new VerifyServerCertificateCallback((con, certificate) => true);
+            }
+
             ldapSessionOptions.ProtocolVersion = 3;
             ldapSessionOptions.ReferralChasing = ReferralChasingOptions.None;
             ldapSessionOptions.SendTimeout = new TimeSpan(0, 0, 10, 0);
 
             connection.Timeout = new TimeSpan(0, 0, 10, 0);
+
+            // Validate connection by attempting to bind
+            try
+            {
+                connection.Bind();
+            }
+            catch (Exception ex)
+            {
+                throw new Exception($"Failed to bind to LDAP server: {ex.Message}", ex);
+            }
             return connection;
         }
 
