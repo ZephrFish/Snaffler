@@ -6,6 +6,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Runtime.InteropServices;
+using System.Security.Principal;
 using System.Text;
 using SnaffCore.ActiveDirectory;
 using SnaffCore.Classifiers.EffectiveAccess;
@@ -19,6 +20,8 @@ namespace SnaffCore.ShareFind
         private BlockingMq Mq { get; set; }
         private BlockingStaticTaskScheduler TreeTaskScheduler { get; set; }
         private TreeWalker TreeWalker { get; set; }
+        private string _ldapUsername { get; set; }
+        private string _ldapPassword { get; set; }
         //private EffectivePermissions effectivePermissions { get; set; } = new EffectivePermissions(MyOptions.CurrentUser);
 
         public ShareFinder()
@@ -26,10 +29,22 @@ namespace SnaffCore.ShareFind
             Mq = BlockingMq.GetMq();
             TreeTaskScheduler = SnaffCon.GetTreeTaskScheduler();
             TreeWalker = SnaffCon.GetTreeWalker();
+
+            // Extract LDAP credentials if provided
+            if (!string.IsNullOrEmpty(MyOptions.LdapUser) && !string.IsNullOrEmpty(MyOptions.LdapPassword))
+            {
+                _ldapUsername = MyOptions.LdapUser;
+                _ldapPassword = MyOptions.LdapPassword;
+            }
         }
 
         internal void GetComputerShares(string computer)
         {
+            // Enhanced share enumeration with LDAP credential support:
+            // - Uses current user context for share enumeration (NetShareEnum Win32 API)
+            // - Uses LDAP credentials for share accessibility testing if provided
+            // - Enables authenticated access to shares on external domains
+
             // find the shares
             HostShareInfo[] hostShareInfos = GetHostShareInfo(computer);
 
@@ -215,6 +230,13 @@ namespace SnaffCore.ShareFind
                 return false;
             }
             BlockingMq Mq = BlockingMq.GetMq();
+
+            // If LDAP credentials are provided, use impersonation
+            if (!string.IsNullOrEmpty(_ldapUsername) && !string.IsNullOrEmpty(_ldapPassword))
+            {
+                return IsShareReadableWithCredentials(share);
+            }
+
             try
             {
                 string[] files = Directory.GetFiles(share);
@@ -237,6 +259,83 @@ namespace SnaffCore.ShareFind
                 Mq.Trace("Unhandled exception in IsShareReadable() for share path: " + share + " Full Exception:" + e.ToString());
             }
             return false;
+        }
+
+        private bool IsShareReadableWithCredentials(string share)
+        {
+            IntPtr tokenHandle = new IntPtr(0);
+            IntPtr duplicateTokenHandle = new IntPtr(0);
+            WindowsImpersonationContext impersonationContext = null;
+
+            try
+            {
+                string domain = string.Empty;
+                string username = _ldapUsername;
+
+                // Extract domain from username if in DOMAIN\username format
+                if (_ldapUsername.Contains("\\"))
+                {
+                    string[] parts = _ldapUsername.Split('\\');
+                    domain = parts[0];
+                    username = parts[1];
+                }
+
+                // Attempt to log on with provided credentials
+                bool returnValue = LogonUser(username, domain, _ldapPassword,
+                    LOGON32_LOGON_NEW_CREDENTIALS, LOGON32_PROVIDER_DEFAULT, out tokenHandle);
+
+                if (!returnValue)
+                {
+                    int ret = Marshal.GetLastWin32Error();
+                    Mq.Trace($"LogonUser failed with error code: {ret}");
+                    return false;
+                }
+
+                // Duplicate the token for impersonation
+                bool duplicateResult = DuplicateToken(tokenHandle, 2, out duplicateTokenHandle);
+                if (!duplicateResult)
+                {
+                    int ret = Marshal.GetLastWin32Error();
+                    Mq.Trace($"DuplicateToken failed with error code: {ret}");
+                    return false;
+                }
+
+                // Create Windows identity and impersonation context
+                WindowsIdentity identity = new WindowsIdentity(duplicateTokenHandle);
+                impersonationContext = identity.Impersonate();
+
+                // Test share accessibility with impersonated credentials
+                string[] files = Directory.GetFiles(share);
+                return true;
+            }
+            catch (UnauthorizedAccessException)
+            {
+                return false;
+            }
+            catch (DirectoryNotFoundException)
+            {
+                return false;
+            }
+            catch (IOException)
+            {
+                return false;
+            }
+            catch (Exception e)
+            {
+                Mq.Trace("Exception in IsShareReadableWithCredentials() for share path: " + share + " Full Exception:" + e.ToString());
+                return false;
+            }
+            finally
+            {
+                // Clean up resources
+                impersonationContext?.Undo();
+
+                if (tokenHandle != IntPtr.Zero)
+                    CloseHandle(tokenHandle);
+
+                if (duplicateTokenHandle != IntPtr.Zero)
+                    CloseHandle(duplicateTokenHandle);
+            }
         }
 
         private string GetShareName(HostShareInfo hostShareInfo, string computer)
@@ -290,6 +389,23 @@ namespace SnaffCore.ShareFind
         // HERE BE WIN32 DRAGONS
         // ---------------------
 
+        // Win32 API for credential management
+        [DllImport("advapi32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+        private static extern bool LogonUser(string lpszUsername, string lpszDomain, string lpszPassword,
+            int dwLogonType, int dwLogonProvider, out IntPtr phToken);
+
+        [DllImport("advapi32.dll", CharSet = CharSet.Auto, SetLastError = true)]
+        private static extern bool DuplicateToken(IntPtr hToken,
+            int impersonationLevel, out IntPtr hNewToken);
+
+        [DllImport("kernel32.dll", CharSet = CharSet.Auto)]
+        private static extern bool CloseHandle(IntPtr handle);
+
+        // Constants for LogonUser
+        private const int LOGON32_LOGON_NEW_CREDENTIALS = 9;
+        private const int LOGON32_PROVIDER_DEFAULT = 0;
+
+        // Existing Win32 API for share enumeration
         [DllImport("Netapi32.dll", SetLastError = true)]
         private static extern int NetWkstaGetInfo(string servername, int level, out IntPtr bufptr);
 
