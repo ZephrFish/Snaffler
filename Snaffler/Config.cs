@@ -119,6 +119,11 @@ namespace Snaffler
             ValueArgument<string> dcIpArg = new ValueArgument<string>('J', "dc-ip",
                 "Domain Controller IP address to connect to directly");
 
+            // Pause/Resume functionality arguments
+            ValueArgument<string> taskFile = new ValueArgument<string>('1', "taskfile", "Save tasks as they are created to a file to allow for resuming mid-operation.");
+            ValueArgument<string> resumeFrom = new ValueArgument<string>('2', "resumefrom", "Resume tasks from a file generated with --taskfile.");
+            ValueArgument<string> taskFileTimeOut = new ValueArgument<string>('3', "taskfiletimeout", "Interval between saving tasks to the task file (in minutes). Default = 5");
+
             CommandLineParser.CommandLineParser parser = new CommandLineParser.CommandLineParser();
             parser.ShowUsageOnEmptyCommandline = false;
             try
@@ -151,6 +156,9 @@ namespace Snaffler
                 parser.Arguments.Add(ldapsArg);
                 parser.Arguments.Add(dnsServerArg);
                 parser.Arguments.Add(dcIpArg);
+                parser.Arguments.Add(taskFile);
+                parser.Arguments.Add(taskFileTimeOut);
+                parser.Arguments.Add(resumeFrom);
             }
 
             // extra check to handle builtin behaviour from cmd line arg parser
@@ -169,6 +177,30 @@ namespace Snaffler
             try
             {
                 parser.ParseCommandLine(args);
+
+                if (taskFile.Parsed)
+                {
+                    parsedConfig.TaskFile = taskFile.Value;
+                }
+
+                if (taskFileTimeOut.Parsed && !String.IsNullOrWhiteSpace(taskFileTimeOut.Value))
+                {
+                    double timeOutVal;
+                    if (double.TryParse(taskFileTimeOut.Value, out timeOutVal))
+                    {
+                        Mq.Info("Set task file saving interval to " + timeOutVal.ToString() + " minutes.");
+                        parsedConfig.TaskFileTimeOut = timeOutVal;
+                    }
+                    else
+                    {
+                        Mq.Error("Invalid task file timeout value passed, defaulting to 5 mins.");
+                    }
+                }
+
+                if (resumeFrom.Parsed)
+                {
+                    parsedConfig.ResumeFrom = resumeFrom.Value;
+                }
 
                 if (timeOutArg.Parsed && !String.IsNullOrWhiteSpace(timeOutArg.Value))
                 {

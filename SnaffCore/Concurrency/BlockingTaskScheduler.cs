@@ -1,9 +1,14 @@
 using System;
 using System.Collections.Generic;
+using System.IO;
+using System.Linq;
 using System.Numerics;
 using System.Security.Principal;
+using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
+using System.Timers;
+using static SnaffCore.Config.Options;
 
 namespace SnaffCore.Concurrency
 {
@@ -34,6 +39,8 @@ namespace SnaffCore.Concurrency
             // single get, it's locked inside the method
             Scheduler.RecalculateCounters();
             TaskCounters taskCounters = Scheduler.GetTaskCounters();
+
+            Console.WriteLine($"Checking if done - queued: {taskCounters.CurrentTasksQueued}, done: {taskCounters.CurrentTasksRunning}");
 
             if ((taskCounters.CurrentTasksQueued + taskCounters.CurrentTasksRunning == 0))
             {
@@ -72,6 +79,168 @@ namespace SnaffCore.Concurrency
                     }, _cancellationSource.Token);
                 }
             }
+        }
+    }
+
+    public enum TaskFileType
+    {
+        None = 0,
+        Share = 1,
+        Tree = 2,
+        File = 3
+    }
+    
+    public enum TaskFileEntryStatus
+    {
+        Pending = 0,
+        Completed = 1,
+    }
+
+    public struct TaskFileEntry
+    {
+        public TaskFileEntryStatus status;
+        public string guid;
+        public TaskFileType type;
+        public string input;
+
+        public override string ToString()
+        {
+            StringBuilder stringBuilder = new StringBuilder();
+
+            stringBuilder.Append(status.ToString());
+            stringBuilder.Append("|");
+            stringBuilder.Append(guid);
+            stringBuilder.Append("|");
+            stringBuilder.Append(type.ToString());
+            stringBuilder.Append("|");
+            stringBuilder.Append(input);
+
+            return stringBuilder.ToString();
+        }
+
+        public TaskFileEntry(TaskFileType type, string input)
+        {
+            guid = Guid.NewGuid().ToString();
+            status = TaskFileEntryStatus.Pending;
+            this.type = type;
+            this.input = input;
+        }
+
+        public TaskFileEntry(string entryLine)
+        {
+            string[] lineParts = entryLine.Split('|');
+
+            status = (TaskFileEntryStatus)Enum.Parse(typeof(TaskFileEntryStatus), lineParts[0]);
+            guid = lineParts[1];
+
+            type = (TaskFileType)Enum.Parse(typeof(TaskFileType), lineParts[2]);
+            input = lineParts[3];
+        }
+    }
+
+    public class ResumingTaskScheduler : BlockingStaticTaskScheduler
+    {
+        private static readonly Dictionary<string, Tuple<string, string>> pendingTasks = new Dictionary<string, Tuple<string, string>>();
+        private static readonly object writeLock = new object();
+        private static int pendingSaveCalls = 0;
+
+        internal BlockingMq Mq { get; }
+
+        public ResumingTaskScheduler(int threads, int maxBacklog) : base(threads, maxBacklog)
+        {
+            this.Mq = BlockingMq.GetMq();
+        }
+
+        public void New(string taskType, Action<string> action, string path)
+        {
+            string guid = null;
+
+            if (MyOptions.TaskFile != null)
+            {
+                guid = Guid.NewGuid().ToString();
+                pendingTasks.Add(guid, new Tuple<string, string>(taskType, path));
+            }
+
+            New(() =>
+            {
+                try
+                {
+                    action(path);
+                }
+                catch (Exception e)
+                {
+                    Mq.Error("Exception in " + taskType.ToString() + " task for host " + path);
+                    Mq.Error(e.ToString());
+                }
+
+                if (guid != null) pendingTasks.Remove(guid);
+            });
+        }
+
+        public static void SaveState(object sender, ElapsedEventArgs e)
+        {
+            SaveState();
+        }
+
+        public static void SaveState()
+        {
+            // Guard against the possibility that someone forgot to check this
+            if (MyOptions.TaskFile == null) return;
+
+            // This blocks more than one save call from being buffered at a time
+            // Prevents a situation where a bunch of buffered calls wait for the lock
+            // But still allows for you to "write continously" if you set an interval shorter than the file write time
+            if (pendingSaveCalls > 1) return;
+            pendingSaveCalls++;
+
+            // In case the file takes longer to write than the set interval
+            lock (writeLock)
+            {
+                using (StreamWriter fileWriter = new StreamWriter(MyOptions.TaskFile, false))
+                {
+                    // Copy the values into the array to avoid an error in case the pending tasks are changed during the write loop
+                    Tuple<string, string>[] valuesSnapshot = pendingTasks.Values.ToArray();
+
+                    foreach (Tuple<string, string> value in valuesSnapshot)
+                    {
+                        fileWriter.WriteLine($"{value.Item1}|{value.Item2}");
+                    }
+
+                    fileWriter.Flush();
+                }
+
+                pendingSaveCalls--;
+            }
+        }
+    }
+
+    public class ShareTaskScheduler : ResumingTaskScheduler
+    {
+        public ShareTaskScheduler(int threads, int maxBacklog) : base(threads, maxBacklog) { }
+
+        public void New(Action<string> action, string share)
+        {
+            New("share", action, share);
+        }
+    }
+
+    public class TreeTaskScheduler : ResumingTaskScheduler
+    {
+        public TreeTaskScheduler(int threads, int maxBacklog) : base(threads, maxBacklog) { }
+
+        public void New(Action<string> action, string tree)
+        {
+            New("tree", action, tree);
+        }
+    }
+
+    public class FileTaskScheduler : ResumingTaskScheduler
+    {
+        public FileTaskScheduler(int threads, int maxBacklog) : base(threads, maxBacklog) { }
+
+        public void New(Action<string> action, string file)
+        {
+            New("file", action, file);
         }
     }
 

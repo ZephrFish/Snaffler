@@ -18,7 +18,7 @@ namespace SnaffCore.ShareFind
     public class ShareFinder
     {
         private BlockingMq Mq { get; set; }
-        private BlockingStaticTaskScheduler TreeTaskScheduler { get; set; }
+        private TreeTaskScheduler TreeTaskScheduler { get; set; }
         private TreeWalker TreeWalker { get; set; }
         private string _ldapUsername { get; set; }
         private string _ldapPassword { get; set; }
@@ -199,18 +199,7 @@ namespace SnaffCore.ShareFind
                             if (MyOptions.ScanFoundShares)
                             {
                                 Mq.Trace("Creating a TreeWalker task for " + shareResult.SharePath);
-                                TreeTaskScheduler.New(() =>
-                                {
-                                    try
-                                    {
-                                        TreeWalker.WalkTree(shareResult.SharePath);
-                                    }
-                                    catch (Exception e)
-                                    {
-                                        Mq.Error("Exception in TreeWalker task for share " + shareResult.SharePath);
-                                        Mq.Error(e.ToString());
-                                    }
-                                });
+                                TreeTaskScheduler.New(TreeWalker.WalkTree, shareResult.SharePath);
                             }
                             Mq.ShareResult(shareResult);
                         }
